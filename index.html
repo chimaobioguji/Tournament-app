@@ -60,10 +60,13 @@
   /* ===== Header ===== */
   .ticker{ display:none; }
   .topbar{
-    display:flex; align-items:center; justify-content:space-between;
-    padding:20px 0; position:sticky; top:0; z-index:30; margin-bottom:28px;
+    display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:10px;
+    padding:16px 0; position:sticky; top:0; z-index:30; margin-bottom:28px;
     background:rgba(248,250,252,.92); backdrop-filter:blur(8px); border-bottom:1px solid var(--border);
   }
+  .topbar-actions{display:flex; align-items:center; gap:8px; flex-wrap:wrap; justify-content:flex-end;}
+  .topbar-email{max-width:150px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; display:inline-block; vertical-align:middle;}
+  @media(max-width:480px){ .topbar-email{ display:none; } }
   .brand{display:flex; align-items:center; gap:10px; cursor:pointer; transition:opacity .15s;}
   .brand:hover{opacity:.75;}
   .brand .mark{
@@ -98,6 +101,7 @@
   /* ===== Dashboard stats row ===== */
   .stats-row{display:grid; grid-template-columns:repeat(3,1fr); gap:14px; margin-bottom:28px;}
   @media(max-width:640px){.stats-row{grid-template-columns:1fr 1fr;}}
+  @media(max-width:380px){.stats-row{grid-template-columns:1fr;}}
   .stat-widget{
     background:var(--card); border:1px solid var(--border); border-radius:var(--r-lg); padding:18px 20px;
     box-shadow:var(--shadow-sm); transition:box-shadow .15s, transform .15s;
@@ -252,7 +256,7 @@
   .match-card:hover{border-color:#CBD5E1; box-shadow:var(--shadow-md); transform:translateY(-1px);}
   .match-card.played{background:var(--card);}
   .match-teams{flex:1; display:flex; align-items:center; justify-content:center; gap:10px; font-size:13.5px;}
-  .match-teams .side{flex:1; font-weight:600; color:var(--text);}
+  .match-teams .side{flex:1; font-weight:600; color:var(--text); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0;}
   .match-teams .side.home{text-align:right;}
   .match-teams .side.away{text-align:left;}
   .score-box{
@@ -305,6 +309,10 @@
   @media(max-width:520px){.stat-cols{grid-template-columns:1fr;}}
   .stat-col-title{font-family:var(--display); font-weight:700; font-size:15.5px; margin-bottom:8px; color:var(--text);}
   .stat-row{display:grid; grid-template-columns:1fr 30px 30px 30px 30px 30px 30px 22px; gap:4px; align-items:center; margin-bottom:6px;}
+  @media(max-width:380px){
+    .stat-row, .stat-head{grid-template-columns:1fr 24px 24px 24px 24px 24px 24px 20px; gap:2px;}
+    .stat-row input{padding:5px 2px !important; font-size:10.5px !important;}
+  }
   .stat-row input[type=text]{padding:6px 8px; font-size:12px;}
   .stat-row input[type=number]{padding:6px 4px; font-size:12px; text-align:center;}
   .stat-row .rm{background:var(--error-bg); border:1px solid #FECACA; color:var(--error); cursor:pointer; font-size:13px; border-radius:6px; padding:4px;}
@@ -329,9 +337,9 @@
   .close-x{position:absolute; top:16px; right:18px; background:var(--border-soft); color:var(--text-secondary); border:none; border-radius:8px; width:28px; height:28px; font-size:14px; cursor:pointer;}
   .close-x:hover{background:var(--error-bg); color:var(--error);}
 
-  .score-input-row{display:flex; align-items:center; justify-content:center; gap:14px; margin:18px 0;}
-  .score-input-row .team-lbl{flex:1; text-align:center; font-weight:700; font-size:13.5px; color:var(--text);}
-  .score-input-row input{width:64px; text-align:center; font-family:var(--display); font-weight:800; font-size:22px; padding:8px;}
+  .score-input-row{display:flex; align-items:center; justify-content:center; gap:14px; margin:18px 0; flex-wrap:wrap;}
+  .score-input-row .team-lbl{flex:1; text-align:center; font-weight:700; font-size:13.5px; color:var(--text); min-width:70px; overflow:hidden; text-overflow:ellipsis;}
+  .score-input-row input{width:64px; text-align:center; font-family:var(--display); font-weight:800; font-size:22px; padding:8px; flex-shrink:0;}
   .vs{font-family:var(--body); color:var(--text-faint); font-size:11px; font-weight:700;}
 
   .photo-drop{
@@ -791,8 +799,8 @@ function renderTopbar(){
       <span class="mark">MATCHDAY</span>
       <span class="sub">tournament tracker</span>
     </div>
-    <div style="display:flex; align-items:center; gap:10px;">
-      ${state.profile && !isPublic ? `<span class="hint" style="margin:0;">${escapeHtml(state.profile.email||'')} · ${state.profile.role==='platform_admin'?'Admin':'Organizer'}</span>` : ''}
+    <div class="topbar-actions">
+      ${state.profile && !isPublic ? `<span class="hint topbar-email" style="margin:0;" title="${escapeHtml(state.profile.email||'')}">${escapeHtml(state.profile.email||'')} · ${state.profile.role==='platform_admin'?'Admin':'Organizer'}</span>` : ''}
       ${showNewBtn ? `<button class="btn btn-gold" data-action="new-tournament">+ New Tournament</button>` : ''}
       ${state.profile && !isPublic ? `<button class="btn btn-sm" data-action="logout">Log out</button>` : ''}
     </div>
@@ -976,12 +984,12 @@ function renderAdminDashboard(){
 
   function orgRow(o){
     return `<div class="match-card" style="cursor:default;">
-      <div class="match-teams" style="justify-content:space-between; text-align:left;">
-        <div>
-          <div style="font-weight:700;">${escapeHtml(o.email||o.id)}</div>
+      <div class="match-teams" style="justify-content:space-between; text-align:left; flex-wrap:wrap; gap:10px;">
+        <div style="min-width:0; overflow:hidden;">
+          <div style="font-weight:700; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${escapeHtml(o.email||o.id)}</div>
           <div class="hint" style="margin:2px 0 0;">Joined ${new Date(o.created_at).toLocaleDateString()}</div>
         </div>
-        <div style="display:flex; gap:8px;">
+        <div style="display:flex; gap:8px; flex-wrap:wrap;">
           ${o.status==='pending' ? `<button class="btn btn-sm btn-gold" data-action="approve-organizer" data-id="${o.id}">Approve</button>` : ''}
           ${o.status==='active' ? `<button class="btn btn-sm btn-danger" data-action="suspend-organizer" data-id="${o.id}">Suspend</button>` : ''}
           ${o.status==='suspended' ? `<button class="btn btn-sm btn-gold" data-action="approve-organizer" data-id="${o.id}">Reactivate</button>` : ''}
