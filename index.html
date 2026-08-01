@@ -544,7 +544,6 @@ async function deleteTournamentRow(id){
 
 function canEditTournament(t){
   if(!state.profile) return false;
-  if(state.profile.role === 'platform_admin') return false; // admin: view-only by design
   return t.organizer_id === state.profile.id;
 }
 function isAdmin(){ return !!state.profile && state.profile.role === 'platform_admin' && state.profile.status === 'active'; }
@@ -791,7 +790,10 @@ function renderNoBackend(){
 }
 
 function renderTopbar(){
-  const showNewBtn = state.view === 'home' && state.profile && state.profile.role === 'organizer';
+  const showNewBtn = state.profile && (
+    (state.view === 'home' && state.profile.role === 'organizer') ||
+    (state.view === 'admin' && isAdmin())
+  );
   const isPublic = state.view === 'public-viewer';
   return `
   <div class="topbar">
