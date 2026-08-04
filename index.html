@@ -236,6 +236,33 @@
     font-family:var(--body); font-weight:700; font-size:12.5px; color:var(--text-secondary);
   }
   tr.qualify .pos-box{background:var(--primary); color:#fff;}
+
+  /* ===== Swiss League: qualification zones + sticky/glass table ===== */
+  tr.qual-direct .pos-box{background:var(--success); color:#fff;}
+  tr.qual-playoff .pos-box{background:var(--warning); color:#fff;}
+  tr.qual-out .pos-box{background:var(--error-bg); color:var(--error);}
+  tr.qual-direct td{background:rgba(34,197,94,.05);}
+  tr.qual-playoff td{background:rgba(245,158,11,.05);}
+  tr.qual-out td{background:rgba(239,68,68,.03);}
+
+  .swiss-standings-wrap{overflow-x:auto; -webkit-overflow-scrolling:touch; border-radius:var(--r-lg);}
+  .swiss-standings-wrap table.standings{min-width:640px;}
+  .swiss-standings-wrap thead th{
+    position:sticky; top:0; z-index:2;
+    background:rgba(255,255,255,.85); backdrop-filter:blur(8px); -webkit-backdrop-filter:blur(8px);
+  }
+  .swiss-standings-wrap th:nth-child(1), .swiss-standings-wrap td:nth-child(1){
+    position:sticky; left:0; z-index:1; min-width:34px;
+    background:rgba(255,255,255,.9); backdrop-filter:blur(8px); -webkit-backdrop-filter:blur(8px);
+  }
+  .swiss-standings-wrap th:nth-child(2), .swiss-standings-wrap td:nth-child(2){
+    position:sticky; left:34px; z-index:1; min-width:130px;
+    background:rgba(255,255,255,.9); backdrop-filter:blur(8px); -webkit-backdrop-filter:blur(8px);
+    box-shadow:2px 0 6px rgba(15,23,42,.08);
+  }
+  .swiss-standings-wrap tr.qual-direct td:nth-child(1), .swiss-standings-wrap tr.qual-direct td:nth-child(2){background:rgba(240,253,244,.92);}
+  .swiss-standings-wrap tr.qual-playoff td:nth-child(1), .swiss-standings-wrap tr.qual-playoff td:nth-child(2){background:rgba(255,251,235,.92);}
+  .swiss-standings-wrap tr.qual-out td:nth-child(1), .swiss-standings-wrap tr.qual-out td:nth-child(2){background:rgba(254,242,242,.92);}
   td.team-name{font-family:var(--body); font-weight:600; font-size:13.5px; color:var(--text);}
   td.pts{font-weight:800; color:var(--primary-dark); font-family:var(--mono);}
   .form-pills{display:flex; gap:3px; justify-content:center;}
@@ -516,7 +543,7 @@ async function loadMyTournaments(){
   if(error) throw error;
   return (data||[]).map(row => {
     const teamCount = (row.data.teams||[]).length;
-    const matchCount = row.type==='league' ? (row.data.matches||[]).length : (row.data.groupMatches||[]).length;
+    const matchCount = (row.type==='league' || row.type==='swiss') ? (row.data.matches||[]).length : (row.data.groupMatches||[]).length;
     const stageLabel = row.type==='cup' ? (row.data.stage==='groups' ? 'Group stage' : 'Knockout') : '';
     return { id: row.id, name: row.name, type: row.type, teamCount, matchCount, stageLabel, organizer_id: row.organizer_id };
   });
@@ -602,7 +629,7 @@ function computeStandings(teams, matches){
 
 /* ---------------- stat aggregation ---------------- */
 function collectAllMatches(t){
-  if(t.type === 'league') return t.matches;
+  if(t.type === 'league' || t.type === 'swiss') return t.matches;
   const all = [...t.groupMatches];
   if(t.knockout) t.knockout.rounds.forEach(r => all.push(...r.matches));
   return all;
@@ -698,6 +725,101 @@ function generateFixtures(teamIds, rounds){
     });
   }
   return matches;
+}
+
+/* ---------------- Swiss League fixture generation ----------------
+   Uses the same proven circle-method round-robin engine: since each
+   matchday in a round-robin schedule is internally duplicate-free,
+   taking the first N matchdays already guarantees every team gets N
+   distinct opponents, no repeats, no self-play. A short repair pass
+   afterwards tops up any team that's short (only relevant with odd
+   team counts, where a bye rotates through). */
+function generateSwissFixtures(teamIds, numMatches){
+  const rrRounds = buildRoundRobinRounds(teamIds);
+  const takeRounds = rrRounds.slice(0, Math.min(numMatches, rrRounds.length));
+  const matches = [];
+  const playedCount = {}, playedAgainst = {}, homeCount = {};
+  teamIds.forEach(id => { playedCount[id]=0; playedAgainst[id]=new Set(); homeCount[id]=0; });
+
+  function addMatch(a, b, round){
+    const swap = homeCount[a] > homeCount[b];
+    const home = swap?b:a, away = swap?a:b;
+    homeCount[home]++;
+    playedCount[a]++; playedCount[b]++;
+    playedAgainst[a].add(b); playedAgainst[b].add(a);
+    matches.push({
+      id: genId(), home, away, round,
+      homeScore:null, awayScore:null, played:false, photo:null, playedAt:null,
+      stats:{home:[], away:[]}, potm:null, statsPhoto:null
+    });
+  }
+
+  takeRounds.forEach((pairs, ri) => {
+    const ordered = shuffleArray(pairs);
+    ordered.forEach(([a,b]) => addMatch(a, b, ri+1));
+  });
+
+  // Repair pass: top up any team short of numMatches (odd-count byes etc.)
+  let extraRound = takeRounds.length + 1;
+  for(let attempt=0; attempt<200; attempt++){
+    const short = teamIds.filter(id => playedCount[id] < numMatches);
+    if(short.length < 2) break;
+    const shuffledShort = shuffleArray(short);
+    let pairedThisPass = false;
+    for(let i=0;i<shuffledShort.length;i++){
+      for(let j=i+1;j<shuffledShort.length;j++){
+        const a = shuffledShort[i], b = shuffledShort[j];
+        if(playedCount[a] < numMatches && playedCount[b] < numMatches && !playedAgainst[a].has(b)){
+          addMatch(a, b, extraRound);
+          pairedThisPass = true;
+        }
+      }
+    }
+    extraRound++;
+    if(!pairedThisPass) break; // no valid pairing left — rare odd-count edge case
+  }
+  return matches;
+}
+
+/* ---------------- Swiss League team statistics ---------------- */
+function computeSwissTeamStats(t){
+  const standings = computeSwissStandings(t.teams, t.matches);
+  const played = t.matches.filter(m => m.played).sort((a,b) => (a.playedAt||0)-(b.playedAt||0));
+  const streaks = {};
+  t.teams.forEach(team => streaks[team.id] = { winStreak:0, bestWinStreak:0, unbeatenStreak:0, bestUnbeatenStreak:0 });
+  played.forEach(m => {
+    [ [m.home, m.homeScore, m.awayScore], [m.away, m.awayScore, m.homeScore] ].forEach(([teamId, gf, ga]) => {
+      const s = streaks[teamId];
+      if(!s) return;
+      if(gf > ga){ s.winStreak++; s.unbeatenStreak++; }
+      else if(gf === ga){ s.winStreak = 0; s.unbeatenStreak++; }
+      else { s.winStreak = 0; s.unbeatenStreak = 0; }
+      s.bestWinStreak = Math.max(s.bestWinStreak, s.winStreak);
+      s.bestUnbeatenStreak = Math.max(s.bestUnbeatenStreak, s.unbeatenStreak);
+    });
+  });
+  return standings.map(row => ({ ...row, ...streaks[row.id] }));
+}
+
+
+function computeSwissStandings(teams, matches){
+  const base = computeStandings(teams, matches);
+  const h2h = (aId, bId) => {
+    let aPts = 0, bPts = 0, played = false;
+    matches.filter(m => m.played).forEach(m => {
+      if(m.home===aId && m.away===bId){ played=true; if(m.homeScore>m.awayScore) aPts+=3; else if(m.homeScore<m.awayScore) bPts+=3; else { aPts+=1; bPts+=1; } }
+      if(m.home===bId && m.away===aId){ played=true; if(m.homeScore>m.awayScore) bPts+=3; else if(m.homeScore<m.awayScore) aPts+=3; else { aPts+=1; bPts+=1; } }
+    });
+    return { played, diff: aPts - bPts };
+  };
+  return base.sort((x, y) => {
+    if(y.Pts !== x.Pts) return y.Pts - x.Pts;
+    if(y.GD !== x.GD) return y.GD - x.GD;
+    if(y.GF !== x.GF) return y.GF - x.GF;
+    const h = h2h(x.id, y.id);
+    if(h.played && h.diff !== 0) return -h.diff;
+    return x.name.localeCompare(y.name);
+  });
 }
 
 /* ---------------- knockout bracket ---------------- */
@@ -820,7 +942,7 @@ function renderHome(){
     cards = `<div class="t-grid">` + state.tournamentsIndex.slice().reverse().map((t,i) => `
       <div class="t-card anim-pop" style="--i:${i}" data-action="open-tournament" data-id="${t.id}">
         <span class="stage-pill">${escapeHtml(t.stageLabel||'')}</span>
-        <span class="badge">${t.type === 'league' ? 'League' : 'Cup'}</span>
+        <span class="badge">${t.type==='league'?'League':t.type==='swiss'?'Swiss':'Cup'}</span>
         <h3>${escapeHtml(t.name)}</h3>
         <div class="meta">${t.teamCount} teams · ${t.matchCount} fixtures</div>
       </div>
@@ -860,7 +982,7 @@ function renderHome(){
 }
 
 function renderNewForm(){
-  const f = state.newForm || (state.newForm = { name:'', type:'league', numTeams:6, teamNames:[], rounds:1, numGroups:2, advancePerGroup:2 });
+  const f = state.newForm || (state.newForm = { name:'', type:'league', numTeams:6, teamNames:[], rounds:1, numGroups:2, advancePerGroup:2, swissMatches:8, swissDirect:8, swissPlayoff:24 });
   const n = Math.max(2, Math.min(64, f.numTeams||0));
   let teamInputs = '';
   for(let i=0;i<n;i++){
@@ -893,16 +1015,29 @@ function renderNewForm(){
         <h4>Cup</h4>
         <p>Group stage, then knockout: QF → SF → Final.</p>
       </div>
+      <div class="type-opt ${f.type==='swiss'?'active':''}" data-action="set-type" data-type="swiss">
+        <h4>Swiss</h4>
+        <p>One table, no groups. Each team plays a fixed number of different opponents.</p>
+      </div>
     </div>
 
-    <label>Number of teams</label>
-    <input type="number" id="f-numteams" min="2" max="64" value="${n}">
+    ${f.type==='swiss' ? `
+      <label>Number of teams</label>
+      <select id="f-swiss-preset">
+        ${[8,12,16,20,24,32].map(v => `<option value="${v}" ${n===v?'selected':''}>${v} teams</option>`).join('')}
+        <option value="custom" ${![8,12,16,20,24,32].includes(n)?'selected':''}>Custom</option>
+      </select>
+      ${![8,12,16,20,24,32].includes(n) ? `<input type="number" id="f-numteams" min="4" max="64" value="${n}" style="margin-top:8px;">` : `<input type="hidden" id="f-numteams" value="${n}">`}
+    ` : `
+      <label>Number of teams</label>
+      <input type="number" id="f-numteams" min="2" max="64" value="${n}">
+    `}
 
     ${f.type==='league' ? `
       <label>Times each team plays every other team</label>
       <input type="number" id="f-rounds" min="1" max="6" value="${f.rounds}">
       <div class="hint">1 = single round robin. 2 = home &amp; away.</div>
-    ` : `
+    ` : f.type==='cup' ? `
       <div class="row">
         <div>
           <label>Number of groups</label>
@@ -914,6 +1049,21 @@ function renderNewForm(){
         </div>
       </div>
       <div class="hint">Teams are split evenly into groups (round robin within each), then the top finishers go into a knockout bracket.</div>
+    ` : `
+      <label>Matches per team</label>
+      <input type="number" id="f-swiss-matches" min="1" max="${Math.max(1,n-1)}" value="${Math.min(f.swissMatches, Math.max(1,n-1))}">
+      <div class="hint">Each team plays this many different opponents — no repeats. Win = 3pts, Draw = 1pt, Loss = 0.</div>
+      <div class="row">
+        <div>
+          <label>Direct qualification spots</label>
+          <input type="number" id="f-swiss-direct" min="0" max="${n}" value="${f.swissDirect}">
+        </div>
+        <div>
+          <label>Playoff zone extends to position</label>
+          <input type="number" id="f-swiss-playoff" min="0" max="${n}" value="${f.swissPlayoff}">
+        </div>
+      </div>
+      <div class="hint">e.g. Top 8 direct, 9th–24th playoff, rest eliminated — matches the UCL-style default. Adjust anytime later.</div>
     `}
 
     <label>Team names</label>
@@ -1011,7 +1161,7 @@ function renderAdminDashboard(){
     ? `<div class="empty"><span class="mark-lg">No tournaments yet</span>Tournaments created by organizers will appear here.</div>`
     : `<div class="t-grid">` + state.tournamentsIndex.map((t,i) => `
         <div class="t-card anim-pop" style="--i:${i}" data-action="open-tournament" data-id="${t.id}">
-          <span class="badge">${t.type === 'league' ? 'League' : 'Cup'}</span>
+          <span class="badge">${t.type==='league'?'League':t.type==='swiss'?'Swiss':'Cup'}</span>
           <h3>${escapeHtml(t.name)}</h3>
           <div class="meta">${t.teamCount} teams · ${t.matchCount} fixtures</div>
         </div>`).join('') + `</div>`;
@@ -1041,6 +1191,8 @@ function renderTournamentView(){
   const isPublicView = state.view === 'public-viewer';
   let tabs = t.type === 'league'
     ? [['standings','Standings'],['fixtures','Fixtures & Results'],['awards','Awards'],['insights','Insights'],['summary','Summary']]
+    : t.type === 'swiss'
+    ? [['standings','League Table'],['fixtures','Fixtures & Results'],['stats','Statistics'],['awards','Awards'],['insights','Insights'],['summary','Summary']]
     : [['groups','Groups'],['bracket','Knockout'],['awards','Awards'],['insights','Insights'],['summary','Summary']];
 
   let body = '';
@@ -1052,6 +1204,10 @@ function renderTournamentView(){
     body = renderSummary(t);
   } else if(t.type === 'league'){
     body = state.activeTab === 'standings' ? renderLeagueStandings(t) : renderLeagueFixtures(t, unlocked);
+  } else if(t.type === 'swiss'){
+    body = state.activeTab === 'standings' ? renderSwissStandings(t, unlocked)
+         : state.activeTab === 'stats' ? renderSwissStatistics(t)
+         : renderSwissFixtures(t, unlocked);
   } else {
     body = state.activeTab === 'groups' ? renderCupGroups(t, unlocked) : renderCupBracket(t, unlocked);
   }
@@ -1077,7 +1233,7 @@ function renderTournamentView(){
     <div style="display:flex; align-items:center; gap:14px;">
       ${t.logo ? `<img src="${t.logo}" alt="" style="width:52px;height:52px;object-fit:cover;border-radius:4px;border:1.5px solid var(--border);">` : ''}
       <div>
-        <span class="badge">${t.type==='league'?'League':'Cup'}</span>
+        <span class="badge">${t.type==='league'?'League':t.type==='swiss'?'Swiss':'Cup'}</span>
         <h1>${escapeHtml(t.name)}</h1>
       </div>
     </div>
@@ -1108,6 +1264,119 @@ function standingsTableHtml(rows, qualifyCount){
         </tr>`).join('')}
     </tbody>
   </table>`;
+}
+
+function swissStandingsTableHtml(rows, qualification){
+  const direct = qualification?.directCount ?? 0;
+  const playoffEnd = qualification?.playoffEnd ?? 0;
+  return `
+  <table class="standings">
+    <thead><tr>
+      <th></th><th class="team-col">Team</th><th>P</th><th>W</th><th>D</th><th>L</th><th>GF</th><th>GA</th><th>GD</th><th>Pts</th><th>Form</th>
+    </tr></thead>
+    <tbody>
+      ${rows.map((r,i) => {
+        const pos = i+1;
+        const zoneClass = pos<=direct ? 'qual-direct' : pos<=playoffEnd ? 'qual-playoff' : 'qual-out';
+        const dot = pos<=direct ? '🟢' : pos<=playoffEnd ? '🟡' : '🔴';
+        return `
+        <tr class="${zoneClass}">
+          <td><span class="pos-box">${pos}</span></td>
+          <td class="team-name">${dot} ${escapeHtml(r.name)}</td>
+          <td>${r.P}</td><td>${r.W}</td><td>${r.D}</td><td>${r.L}</td>
+          <td>${r.GF}</td><td>${r.GA}</td><td>${r.GD>0?'+':''}${r.GD}</td>
+          <td class="pts">${r.Pts}</td>
+          <td><div class="form-pills">${r.form.slice(-5).map(x=>`<span class="pill ${x}">${x}</span>`).join('') || '<span style="color:var(--text-faint);font-size:11px;">—</span>'}</div></td>
+        </tr>`;
+      }).join('')}
+    </tbody>
+  </table>`;
+}
+
+function renderSwissStandings(t, unlocked){
+  const rows = computeSwissStandings(t.teams, t.matches);
+  const totalMatches = t.matches.length;
+  const playedMatches = t.matches.filter(m=>m.played).length;
+  const remaining = totalMatches - playedMatches;
+  const leader = rows[0];
+  const progressPct = totalMatches ? Math.round((playedMatches/totalMatches)*100) : 0;
+  const scheduleLocked = t.matches.some(m=>m.played);
+
+  return `
+  <div class="stats-row">
+    <div class="stat-widget"><div class="sw-icon">👥</div><div class="sw-value">${t.teams.length}</div><div class="sw-label">Total Teams</div></div>
+    <div class="stat-widget"><div class="sw-icon">⚽</div><div class="sw-value">${playedMatches}/${totalMatches}</div><div class="sw-label">Matches Played</div></div>
+    <div class="stat-widget"><div class="sw-icon">⏳</div><div class="sw-value">${remaining}</div><div class="sw-label">Remaining</div></div>
+  </div>
+  <div class="stats-row">
+    <div class="stat-widget"><div class="sw-icon">🏆</div><div class="sw-value" style="font-size:17px;">${leader ? escapeHtml(leader.name) : '—'}</div><div class="sw-label">Current Leader</div></div>
+    <div class="stat-widget"><div class="sw-icon">📊</div><div class="sw-value">${progressPct}%</div><div class="sw-label">Tournament Progress</div></div>
+  </div>
+
+  <div class="hint" style="margin:14px 0 8px;">🟢 Top ${t.qualification.directCount} = Direct Qualification &nbsp; 🟡 ${t.qualification.directCount+1}–${t.qualification.playoffEnd} = Playoff &nbsp; 🔴 Rest = Eliminated</div>
+
+  <div class="swiss-standings-wrap panel" style="padding:0;">
+    ${swissStandingsTableHtml(rows, t.qualification)}
+  </div>
+
+  ${unlocked ? `
+  <div class="stage-actions">
+    ${!scheduleLocked ? `<button class="btn btn-sm" data-action="regenerate-swiss">Regenerate Fixtures</button>` : `<span class="hint" style="align-self:center;">Schedule locked — first match already played.</span>`}
+    <button class="btn btn-sm" data-action="export-standings-image">Export Standings (Image)</button>
+    <button class="btn btn-sm" data-action="export-fixtures-csv">Export Fixtures (CSV)</button>
+    <button class="btn btn-sm btn-danger" data-action="reset-swiss">Reset Swiss League</button>
+  </div>` : ''}
+  `;
+}
+
+function renderSwissFixtures(t, unlocked){
+  const teamsById = Object.fromEntries(t.teams.map(x=>[x.id,x]));
+  const rounds = {};
+  t.matches.forEach(m => { const r = m.round||1; (rounds[r] = rounds[r]||[]).push(m); });
+  const roundNumbers = Object.keys(rounds).map(Number).sort((a,b)=>a-b);
+  return `
+  <div class="panel">
+    ${unlocked ? `<div class="stage-actions"><button class="btn btn-sm" data-action="add-manual-match" data-scope="league">+ Add extra match</button></div>` : ''}
+    ${roundNumbers.map(rn => `
+      <div class="group-block">
+        <div class="group-title">Round ${rn}</div>
+        <div class="match-list">
+          ${rounds[rn].map((m,i) => matchCardHtml(m, teamsById, unlocked, 'edit-league-match', '', i)).join('')}
+        </div>
+      </div>
+    `).join('')}
+  </div>`;
+}
+
+function renderSwissStatistics(t){
+  const rows = computeSwissTeamStats(t);
+  const active = rows.filter(r => r.P > 0);
+  if(active.length === 0){
+    return `<div class="empty"><span class="mark-lg">No matches played yet</span>Statistics will appear once results start coming in.</div>`;
+  }
+  const mostWins = [...active].sort((a,b)=>b.W-a.W)[0];
+  const bestAttack = [...active].sort((a,b)=>b.GF-a.GF)[0];
+  const bestDefence = [...active].sort((a,b)=>a.GA-b.GA)[0];
+  const longestWinStreak = [...active].sort((a,b)=>b.bestWinStreak-a.bestWinStreak)[0];
+  const longestUnbeaten = [...active].sort((a,b)=>b.bestUnbeatenStreak-a.bestUnbeatenStreak)[0];
+
+  function card(label, r, statLabel, val, allowZero){
+    if(!r || (!allowZero && val<=0)) return `<div class="trophy-card empty-trophy"><div class="trophy-label">${label}</div><div class="hint">No data yet</div></div>`;
+    return `<div class="trophy-card"><div class="trophy-label">${label}</div><div class="trophy-name">${escapeHtml(r.name)}</div><div class="trophy-stat">${val} ${escapeHtml(statLabel)}</div></div>`;
+  }
+
+  return `
+  <div class="trophy-row">
+    ${card('Most Wins', mostWins, 'wins', mostWins.W)}
+    ${card('Best Attack', bestAttack, 'goals scored', bestAttack.GF)}
+    ${card('Best Defence', bestDefence, 'goals conceded', bestDefence.GA, true)}
+  </div>
+  <div class="trophy-row">
+    ${card('Longest Win Streak', longestWinStreak, 'wins in a row', longestWinStreak.bestWinStreak)}
+    ${card('Longest Unbeaten Run', longestUnbeaten, 'games unbeaten', longestUnbeaten.bestUnbeatenStreak)}
+    <div class="trophy-card"><div class="trophy-label">Top Scorers</div><div class="hint" style="margin-top:8px;">See the Awards tab for individual player goals &amp; assists.</div></div>
+  </div>
+  `;
 }
 
 function renderLeagueStandings(t){
@@ -1355,6 +1624,11 @@ function renderSummary(t){
     const complete = t.matches.length > 0 && t.matches.every(m => m.played);
     if(complete && standings[0]) champion = standings[0].name;
     standingsBlock = `<div class="panel">${standingsTableHtml(standings)}</div>`;
+  } else if(t.type === 'swiss'){
+    const standings = computeSwissStandings(t.teams, t.matches);
+    const complete = t.matches.length > 0 && t.matches.every(m => m.played);
+    if(complete && standings[0]) champion = standings[0].name;
+    standingsBlock = `<div class="swiss-standings-wrap panel" style="padding:0;">${swissStandingsTableHtml(standings, t.qualification)}</div>`;
   } else {
     if(t.stage === 'knockout' && t.knockout){
       const finalRound = t.knockout.rounds[t.knockout.rounds.length - 1];
@@ -1471,6 +1745,20 @@ function renderModal(){
     </div>`;
   }
 
+  if(md.type === 'reset-swiss-confirm'){
+    return `<div class="overlay" data-action="close-modal-bg">
+      <div class="modal" onclick="event.stopPropagation()">
+        <button class="close-x" data-action="close-modal">✕</button>
+        <h2>Reset Swiss League?</h2>
+        <p class="sub-txt">This clears every result and generates a brand new random schedule. This can't be undone.</p>
+        ${state.err ? `<div class="msg err">${escapeHtml(state.err)}</div>` : ''}
+        <div class="modal-actions">
+          <button class="btn" data-action="close-modal">Cancel</button>
+          <button class="btn btn-danger" data-action="confirm-reset-swiss">Reset League</button>
+        </div>
+      </div>
+    </div>`;
+  }
   if(md.type === 'delete-confirm'){
     return `<div class="overlay" data-action="close-modal-bg">
       <div class="modal" onclick="event.stopPropagation()">
@@ -1690,6 +1978,17 @@ function attachEvents(){
   if(numGroupsEl) numGroupsEl.addEventListener('input', e => state.newForm.numGroups = parseInt(e.target.value)||1);
   const advEl = document.getElementById('f-advance');
   if(advEl) advEl.addEventListener('input', e => state.newForm.advancePerGroup = parseInt(e.target.value)||1);
+  const swissPresetEl = document.getElementById('f-swiss-preset');
+  if(swissPresetEl) swissPresetEl.addEventListener('change', e => {
+    if(e.target.value !== 'custom') state.newForm.numTeams = parseInt(e.target.value);
+    render();
+  });
+  const swissMatchesEl = document.getElementById('f-swiss-matches');
+  if(swissMatchesEl) swissMatchesEl.addEventListener('input', e => state.newForm.swissMatches = parseInt(e.target.value)||1);
+  const swissDirectEl = document.getElementById('f-swiss-direct');
+  if(swissDirectEl) swissDirectEl.addEventListener('input', e => state.newForm.swissDirect = parseInt(e.target.value)||0);
+  const swissPlayoffEl = document.getElementById('f-swiss-playoff');
+  if(swissPlayoffEl) swissPlayoffEl.addEventListener('input', e => state.newForm.swissPlayoff = parseInt(e.target.value)||0);
   root.querySelectorAll('[data-team-idx]').forEach(el => {
     el.addEventListener('input', e => {
       const idx = parseInt(el.getAttribute('data-team-idx'));
@@ -1773,6 +2072,11 @@ async function dispatchAction(action, el){
   else if(action === 'save-score'){ await saveScore(); }
   else if(action === 'clear-result'){ await clearScore(); }
   else if(action === 'generate-bracket'){ await generateBracket(); }
+  else if(action === 'regenerate-swiss'){ await regenerateSwissFixtures(); }
+  else if(action === 'reset-swiss'){ state.modal = {type:'reset-swiss-confirm'}; render(); }
+  else if(action === 'confirm-reset-swiss'){ await resetSwissLeague(); }
+  else if(action === 'export-standings-image'){ exportStandingsImage(); }
+  else if(action === 'export-fixtures-csv'){ exportFixturesCSV(); }
   else if(action === 'add-manual-match'){ state.modal = {type:'add-match'}; render(); }
   else if(action === 'confirm-add-match'){ await confirmAddMatch(); }
   else if(action === 'open-stats'){
@@ -1867,6 +2171,13 @@ async function createTournament(){
   if(f.type === 'league'){
     t.rounds = Math.max(1, Math.min(6, f.rounds||1));
     t.matches = generateFixtures(teams.map(x=>x.id), t.rounds);
+  } else if(f.type === 'swiss'){
+    t.numMatches = Math.max(1, Math.min(teams.length-1, f.swissMatches||8));
+    t.qualification = {
+      directCount: Math.max(0, Math.min(teams.length, f.swissDirect ?? 8)),
+      playoffEnd: Math.max(0, Math.min(teams.length, f.swissPlayoff ?? 24)),
+    };
+    t.matches = generateSwissFixtures(teams.map(x=>x.id), t.numMatches);
   } else {
     const numGroups = Math.max(1, Math.min(8, f.numGroups||1));
     t.advancePerGroup = Math.max(1, Math.min(4, f.advancePerGroup||1));
@@ -1896,13 +2207,13 @@ async function createTournament(){
   state.tournamentsIndex.push(indexEntry(created));
   state.currentTournament = created;
   state.view = 'tournament';
-  state.activeTab = created.type==='league' ? 'standings' : 'groups';
+  state.activeTab = (created.type==='league' || created.type==='swiss') ? 'standings' : 'groups';
   render();
 }
 
 function indexEntry(t){
-  const matchCount = t.type==='league' ? t.matches.length : t.groupMatches.length;
-  const stageLabel = t.type==='league' ? '' : (t.stage==='groups' ? 'Group stage' : 'Knockout');
+  const matchCount = (t.type==='league' || t.type==='swiss') ? t.matches.length : t.groupMatches.length;
+  const stageLabel = t.type==='cup' ? (t.stage==='groups' ? 'Group stage' : 'Knockout') : '';
   return { id:t.id, name:t.name, type:t.type, teamCount:t.teams.length, matchCount, stageLabel, organizer_id:t.organizer_id };
 }
 async function refreshIndexEntry(t){
@@ -1978,7 +2289,7 @@ async function openTournament(id){
   if(!t){ state.view = state.profile ? (isAdmin() ? 'admin' : 'home') : 'login'; render(); return; }
   state.currentTournament = t;
   state.view = 'tournament';
-  state.activeTab = t.type==='league' ? 'standings' : 'groups';
+  state.activeTab = (t.type==='league' || t.type==='swiss') ? 'standings' : 'groups';
   render();
 }
 
@@ -2098,8 +2409,8 @@ async function saveScore(){
   if(md.kind === 'league'){
     const m = t.matches.find(x=>x.id===md.match.id); Object.assign(m, patch);
     if(t.matches.every(x=>x.played)){
-      const standings = computeStandings(t.teams, t.matches);
-      if(standings[0]) celebration = { label:'League Champion', champion: standings[0].name };
+      const standings = t.type === 'swiss' ? computeSwissStandings(t.teams, t.matches) : computeStandings(t.teams, t.matches);
+      if(standings[0]) celebration = { label: t.type === 'swiss' ? 'Swiss League Winner' : 'League Champion', champion: standings[0].name };
     }
   } else if(md.kind === 'group'){
     const m = t.groupMatches.find(x=>x.id===md.match.id); Object.assign(m, patch);
@@ -2243,6 +2554,119 @@ async function confirmAddMatch(){
 }
 
 /* ---------------- bracket generation ---------------- */
+/* ---------------- Swiss League admin actions ---------------- */
+async function regenerateSwissFixtures(){
+  const t = state.currentTournament;
+  if(t.matches.some(m=>m.played)){ state.err = "Can't regenerate — the schedule locks once a match has been played."; render(); return; }
+  t.matches = generateSwissFixtures(t.teams.map(x=>x.id), t.numMatches);
+  await saveTournament(t);
+  await refreshIndexEntry(t);
+  render();
+}
+
+async function resetSwissLeague(){
+  const t = state.currentTournament;
+  t.matches = generateSwissFixtures(t.teams.map(x=>x.id), t.numMatches);
+  await saveTournament(t);
+  await refreshIndexEntry(t);
+  state.modal = null;
+  render();
+}
+
+function exportFixturesCSV(){
+  const t = state.currentTournament;
+  const teamsById = Object.fromEntries(t.teams.map(x=>[x.id,x]));
+  const rows = [['Round','Home','Away','Home Score','Away Score','Played']];
+  t.matches.forEach(m => {
+    rows.push([
+      m.round||1,
+      teamsById[m.home]?.name||'',
+      teamsById[m.away]?.name||'',
+      m.homeScore ?? '',
+      m.awayScore ?? '',
+      m.played ? 'Yes' : 'No'
+    ]);
+  });
+  const csv = rows.map(r => r.map(cell => `"${String(cell).replace(/"/g,'""')}"`).join(',')).join('\n');
+  const blob = new Blob([csv], { type:'text/csv;charset=utf-8;' });
+  const link = document.createElement('a');
+  link.href = URL.createObjectURL(blob);
+  link.download = (t.name || 'fixtures').replace(/[^a-z0-9]/gi,'-').toLowerCase() + '-fixtures.csv';
+  link.click();
+}
+
+function exportStandingsImage(){
+  const t = state.currentTournament;
+  const rows = computeSwissStandings(t.teams, t.matches);
+  const direct = t.qualification.directCount, playoffEnd = t.qualification.playoffEnd;
+  const rowH = 30, headerH = 90, footerH = 30;
+  const width = 760, height = headerH + rows.length*rowH + footerH;
+  const canvas = document.createElement('canvas');
+  canvas.width = width; canvas.height = height;
+  const ctx = canvas.getContext('2d');
+
+  ctx.fillStyle = '#F8FAFC'; ctx.fillRect(0,0,width,height);
+  ctx.fillStyle = '#0F172A';
+  ctx.font = 'bold 22px sans-serif';
+  ctx.fillText(t.name, 20, 34);
+  ctx.fillStyle = '#64748B';
+  ctx.font = '13px sans-serif';
+  ctx.fillText('Swiss League — Standings', 20, 54);
+
+  const cols = [
+    { label:'#', x:20, w:26 },
+    { label:'Team', x:50, w:230 },
+    { label:'P', x:290, w:32 },
+    { label:'W', x:325, w:32 },
+    { label:'D', x:360, w:32 },
+    { label:'L', x:395, w:32 },
+    { label:'GF', x:430, w:34 },
+    { label:'GA', x:466, w:34 },
+    { label:'GD', x:502, w:36 },
+    { label:'Pts', x:545, w:40 },
+  ];
+  const tableTop = headerH - 20;
+  ctx.font = 'bold 11px monospace';
+  ctx.fillStyle = '#94A3B8';
+  cols.forEach(c => ctx.fillText(c.label.toUpperCase(), c.x, tableTop));
+
+  rows.forEach((r, i) => {
+    const y = headerH + i*rowH;
+    const pos = i+1;
+    const zoneColor = pos<=direct ? '#22C55E' : pos<=playoffEnd ? '#F59E0B' : '#EF4444';
+    ctx.fillStyle = pos<=direct ? 'rgba(34,197,94,.08)' : pos<=playoffEnd ? 'rgba(245,158,11,.08)' : 'rgba(239,68,68,.05)';
+    ctx.fillRect(14, y-20, width-28, rowH-4);
+    ctx.fillStyle = zoneColor;
+    ctx.beginPath(); ctx.arc(28, y-6, 5, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = '#0F172A';
+    ctx.font = '12px monospace';
+    ctx.fillText(String(pos), 22, y);
+    ctx.font = '600 13px sans-serif';
+    ctx.fillText(r.name.length>26 ? r.name.slice(0,25)+'…' : r.name, 50, y);
+    ctx.font = '12px monospace';
+    ctx.fillStyle = '#334155';
+    ctx.fillText(String(r.P), 290, y);
+    ctx.fillText(String(r.W), 325, y);
+    ctx.fillText(String(r.D), 360, y);
+    ctx.fillText(String(r.L), 395, y);
+    ctx.fillText(String(r.GF), 430, y);
+    ctx.fillText(String(r.GA), 466, y);
+    ctx.fillText((r.GD>0?'+':'')+r.GD, 502, y);
+    ctx.font = 'bold 12px monospace';
+    ctx.fillStyle = '#16A34A';
+    ctx.fillText(String(r.Pts), 545, y);
+  });
+
+  ctx.fillStyle = '#94A3B8';
+  ctx.font = '11px monospace';
+  ctx.fillText('🟢 Direct  🟡 Playoff  🔴 Eliminated', 20, height-12);
+
+  const link = document.createElement('a');
+  link.download = (t.name || 'standings').replace(/[^a-z0-9]/gi,'-').toLowerCase() + '-standings.png';
+  link.href = canvas.toDataURL('image/png');
+  link.click();
+}
+
 async function generateBracket(){
   const t = state.currentTournament;
   const qualifiers = []; // ordered: all 1st place, then all 2nd place, etc
@@ -2311,7 +2735,7 @@ async function init(){
     if(t && t.is_public !== false){
       state.currentTournament = t;
       state.view = 'public-viewer';
-      state.activeTab = t.type==='league' ? 'standings' : 'groups';
+      state.activeTab = (t.type==='league' || t.type==='swiss') ? 'standings' : 'groups';
     } else {
       state.view = 'public-viewer';
       state.currentTournament = null;
