@@ -335,16 +335,16 @@
   .stat-cols{display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-top:14px;}
   @media(max-width:520px){.stat-cols{grid-template-columns:1fr;}}
   .stat-col-title{font-family:var(--display); font-weight:700; font-size:15.5px; margin-bottom:8px; color:var(--text);}
-  .stat-row{display:grid; grid-template-columns:1fr 30px 30px 30px 30px 30px 30px 22px; gap:4px; align-items:center; margin-bottom:6px;}
-  @media(max-width:380px){
-    .stat-row, .stat-head{grid-template-columns:1fr 24px 24px 24px 24px 24px 24px 20px; gap:2px;}
-    .stat-row input{padding:5px 2px !important; font-size:10.5px !important;}
-  }
-  .stat-row input[type=text]{padding:6px 8px; font-size:12px;}
-  .stat-row input[type=number]{padding:6px 4px; font-size:12px; text-align:center;}
+  .stat-col-scroll{overflow-x:auto; -webkit-overflow-scrolling:touch; padding-bottom:2px;}
+  .goal-event-row{display:grid; grid-template-columns:56px 110px 1fr 28px; gap:6px; align-items:center; margin-top:6px;}
+  .goal-event-row input, .goal-event-row select{padding:7px 8px; font-size:12.5px;}
+  .goal-event-row input[type=number]{text-align:center;}
+  .stat-row{display:grid; grid-template-columns:130px 38px 38px 38px 38px 38px 38px 28px; gap:6px; align-items:center; margin-bottom:6px;}
+  .stat-row input[type=text]{padding:7px 8px; font-size:12.5px; width:100%;}
+  .stat-row input[type=number]{padding:7px 2px; font-size:13px; text-align:center; width:100%;}
   .stat-row .rm{background:var(--error-bg); border:1px solid #FECACA; color:var(--error); cursor:pointer; font-size:13px; border-radius:6px; padding:4px;}
   .stat-row .rm:hover{background:var(--error); color:#fff;}
-  .stat-head{display:grid; grid-template-columns:1fr 30px 30px 30px 30px 30px 30px 22px; gap:4px; font-family:var(--body); font-size:9.5px; font-weight:700; color:var(--text-faint); text-transform:uppercase; margin-bottom:4px;}
+  .stat-head{display:grid; grid-template-columns:130px 38px 38px 38px 38px 38px 38px 28px; gap:6px; font-family:var(--body); font-size:9.5px; font-weight:700; color:var(--text-faint); text-transform:uppercase; margin-bottom:4px;}
   .stat-head span{text-align:center;}
   .stat-head span:first-child{text-align:left;}
   .ocr-box{width:100%; background:var(--border-soft); border:1px solid var(--border); border-radius:var(--r-sm); color:var(--text-secondary); font-family:var(--mono); font-size:10.5px; padding:8px; margin-top:8px; min-height:70px;}
@@ -718,7 +718,7 @@ function generateFixtures(teamIds, rounds){
         matches.push({
           id: genId(), home: swap?b:a, away: swap?a:b,
           homeScore:null, awayScore:null, played:false, photo:null, playedAt:null,
-          stats:{home:[], away:[]}, potm:null, statsPhoto:null
+          stats:{home:[], away:[]}, potm:null, statsPhoto:null, teamStats:{home:{shots:null, shotsOnGoal:null, possession:null, passAccuracy:null, fouls:null, offsides:null}, away:{shots:null, shotsOnGoal:null, possession:null, passAccuracy:null, fouls:null, offsides:null}}, goalEvents:[]
         });
       });
       forbidden = ordered.length ? [ordered[ordered.length-1][0], ordered[ordered.length-1][1]] : [];
@@ -738,19 +738,16 @@ function generateSwissFixtures(teamIds, numMatches){
   const rrRounds = buildRoundRobinRounds(teamIds);
   const takeRounds = rrRounds.slice(0, Math.min(numMatches, rrRounds.length));
   const matches = [];
-  const playedCount = {}, playedAgainst = {}, homeCount = {};
-  teamIds.forEach(id => { playedCount[id]=0; playedAgainst[id]=new Set(); homeCount[id]=0; });
+  const playedCount = {}, playedAgainst = {};
+  teamIds.forEach(id => { playedCount[id]=0; playedAgainst[id]=new Set(); });
 
   function addMatch(a, b, round){
-    const swap = homeCount[a] > homeCount[b];
-    const home = swap?b:a, away = swap?a:b;
-    homeCount[home]++;
     playedCount[a]++; playedCount[b]++;
     playedAgainst[a].add(b); playedAgainst[b].add(a);
     matches.push({
-      id: genId(), home, away, round,
+      id: genId(), home:a, away:b, round,
       homeScore:null, awayScore:null, played:false, photo:null, playedAt:null,
-      stats:{home:[], away:[]}, potm:null, statsPhoto:null
+      stats:{home:[], away:[]}, potm:null, statsPhoto:null, teamStats:{home:{shots:null, shotsOnGoal:null, possession:null, passAccuracy:null, fouls:null, offsides:null}, away:{shots:null, shotsOnGoal:null, possession:null, passAccuracy:null, fouls:null, offsides:null}}, goalEvents:[]
     });
   }
 
@@ -778,7 +775,85 @@ function generateSwissFixtures(teamIds, numMatches){
     extraRound++;
     if(!pairedThisPass) break; // no valid pairing left — rare odd-count edge case
   }
+
+  assignBalancedHomeAway(teamIds, matches);
   return matches;
+}
+
+/* Guarantees an exact home/away split per team whenever mathematically
+   possible (i.e. every team's match count is even — true for the default
+   8-a-side Swiss setup). Works by finding an Eulerian circuit through each
+   team's set of matches and orienting home/away along the traversal
+   direction, which is the standard technique for splitting a graph's edges
+   evenly per vertex. Falls back to a simple greedy balance for any team
+   left with an odd match count (rare edge case). */
+function findEulerianCircuit(adj, start){
+  const stack = [start];
+  const circuit = [];
+  const idxPtr = new Map();
+  while(stack.length){
+    const v = stack[stack.length-1];
+    const list = adj.get(v);
+    let i = idxPtr.get(v) || 0;
+    while(i < list.length && list[i].used) i++;
+    idxPtr.set(v, i);
+    if(i < list.length){
+      const edge = list[i];
+      edge.used = true;
+      const rev = adj.get(edge.to).find(e => e.key === edge.key && !e.used);
+      if(rev) rev.used = true;
+      stack.push(edge.to);
+    } else {
+      circuit.push(stack.pop());
+    }
+  }
+  return circuit.reverse();
+}
+
+function assignBalancedHomeAway(teamIds, matches){
+  const matchByPairKey = new Map();
+  matches.forEach(m => matchByPairKey.set([m.home, m.away].sort().join('|'), m));
+
+  const degree = {}; teamIds.forEach(id => degree[id]=0);
+  matches.forEach(m => { degree[m.home]++; degree[m.away]++; });
+
+  const parent = {}; teamIds.forEach(id => parent[id]=id);
+  function find(x){ while(parent[x]!==x){ parent[x]=parent[parent[x]]; x=parent[x]; } return x; }
+  function union(a,b){ const ra=find(a), rb=find(b); if(ra!==rb) parent[ra]=rb; }
+  matches.forEach(m => union(m.home, m.away));
+
+  const components = {};
+  teamIds.forEach(id => { const r = find(id); (components[r]=components[r]||[]).push(id); });
+
+  Object.values(components).forEach(compTeams => {
+    const compSet = new Set(compTeams);
+    const compEdges = matches.filter(m => compSet.has(m.home));
+    if(compEdges.length === 0) return;
+    const allEven = compTeams.every(id => degree[id] % 2 === 0);
+
+    if(allEven){
+      const adj = new Map();
+      compTeams.forEach(id => adj.set(id, []));
+      compEdges.forEach(m => {
+        const key = [m.home, m.away].sort().join('|');
+        adj.get(m.home).push({ to:m.away, key, used:false });
+        adj.get(m.away).push({ to:m.home, key, used:false });
+      });
+      const circuit = findEulerianCircuit(adj, compTeams[0]);
+      for(let i=0;i<circuit.length-1;i++){
+        const away = circuit[i], home = circuit[i+1];
+        const key = [away,home].sort().join('|');
+        const m = matchByPairKey.get(key);
+        if(m){ m.home = home; m.away = away; }
+      }
+    } else {
+      const homeCount = {}; compTeams.forEach(id=>homeCount[id]=0);
+      shuffleArray(compEdges).forEach(m => {
+        if(homeCount[m.home] > homeCount[m.away]){ const tmp=m.home; m.home=m.away; m.away=tmp; }
+        homeCount[m.home]++;
+      });
+    }
+  });
 }
 
 /* ---------------- Swiss League team statistics ---------------- */
@@ -852,7 +927,7 @@ function buildKnockout(qualifiers){
       id: genId(), home, away,
       homeScore:null, awayScore:null,
       played: (away===null && home) ? true : false,
-      photo:null, stats:{home:[], away:[]}, potm:null, statsPhoto:null
+      photo:null, stats:{home:[], away:[]}, potm:null, statsPhoto:null, teamStats:{home:{shots:null, shotsOnGoal:null, possession:null, passAccuracy:null, fouls:null, offsides:null}, away:{shots:null, shotsOnGoal:null, possession:null, passAccuracy:null, fouls:null, offsides:null}}, goalEvents:[]
     });
   }
   const rounds = [{ matches: round1 }];
@@ -861,7 +936,7 @@ function buildKnockout(qualifiers){
     count = count/2;
     rounds.push({ matches: Array.from({length:count}, () => ({
       id: genId(), home:null, away:null, homeScore:null, awayScore:null, played:false, photo:null,
-      stats:{home:[], away:[]}, potm:null, statsPhoto:null
+      stats:{home:[], away:[]}, potm:null, statsPhoto:null, teamStats:{home:{shots:null, shotsOnGoal:null, possession:null, passAccuracy:null, fouls:null, offsides:null}, away:{shots:null, shotsOnGoal:null, possession:null, passAccuracy:null, fouls:null, offsides:null}}, goalEvents:[]
     })) });
   }
   refreshKnockoutRounds(rounds);
@@ -1392,7 +1467,7 @@ function matchCardHtml(m, teamsById, unlocked, kind, extraData, idx){
     ? `<div class="score-box${justScored}">${m.homeScore} – ${m.awayScore}</div>`
     : `<div class="score-box unplayed">${(m.home===null||m.away===null) ? 'BYE' : 'vs'}</div>`;
   const canClick = unlocked && m.home && m.away;
-  const hasStats = m.stats && ((m.stats.home&&m.stats.home.length) || (m.stats.away&&m.stats.away.length) || (m.potm&&m.potm.name));
+  const hasStats = (m.stats && ((m.stats.home&&m.stats.home.length) || (m.stats.away&&m.stats.away.length) || (m.potm&&m.potm.name))) || (m.goalEvents&&m.goalEvents.length);
   return `
   <div class="match-card-row anim-pop" style="--i:${idx||0}">
     <div class="match-card ${m.played?'played':''}" ${canClick?`data-action="${kind}" data-mid="${m.id}" ${extraData||''}`:''} style="${canClick?'':'cursor:default;'}">
@@ -1404,6 +1479,13 @@ function matchCardHtml(m, teamsById, unlocked, kind, extraData, idx){
       </div>
       <span class="thumb-placeholder"></span>
     </div>
+    ${(m.played && m.teamStats && Object.values(m.teamStats.home||{}).concat(Object.values(m.teamStats.away||{})).some(v=>v!=null)) ? `
+    <div class="hint" style="text-align:center; margin:0;">
+      ${m.teamStats.home.possession!=null || m.teamStats.away.possession!=null ? `Possession: ${m.teamStats.home.possession ?? '—'}% – ${m.teamStats.away.possession ?? '—'}%` : ''}
+      ${m.teamStats.home.shots!=null || m.teamStats.away.shots!=null ? ` · Shots: ${m.teamStats.home.shots ?? '—'} – ${m.teamStats.away.shots ?? '—'}` : ''}
+    </div>` : ''}
+    ${(m.goalEvents && m.goalEvents.length) ? `
+    <div class="hint" style="text-align:center; margin:0;">⚽ ${m.goalEvents.slice().sort((a,b)=>(a.minute||0)-(b.minute||0)).map(g => `${g.minute!=null?g.minute+"' ":''}${escapeHtml(g.player)}`).join(', ')}</div>` : ''}
     ${(unlocked && m.home && m.away) ? `
     <div class="match-actions">
       ${hasStats ? `<span class="stats-badge">stats logged</span>` : ''}
@@ -1471,7 +1553,7 @@ function renderCupBracket(t, unlocked){
           const winner = getWinner(m);
           const isBye = ri===0 && m.away===null && m.home;
           const canClick = unlocked && m.home && m.away;
-          const hasStats = m.stats && ((m.stats.home&&m.stats.home.length) || (m.stats.away&&m.stats.away.length) || (m.potm&&m.potm.name));
+          const hasStats = (m.stats && ((m.stats.home&&m.stats.home.length) || (m.stats.away&&m.stats.away.length) || (m.potm&&m.potm.name))) || (m.goalEvents&&m.goalEvents.length);
           const justScored = state.justSavedMatchId === m.id ? ' just-scored' : '';
           return `<div class="bk-match ${m.played?'decided':''}${justScored}" ${canClick?`data-action="edit-knockout-match" data-mid="${m.id}" data-round="${ri}"`:''} style="${canClick?'':'cursor:default;'}">
             <div class="bk-side ${winner===m.home?'winner':''}"><span class="nm">${escapeHtml(homeName)}</span><span class="sc">${m.homeScore ?? ''}</span></div>
@@ -1547,7 +1629,7 @@ function renderAwards(t){
 function computeTeamInsights(t){
   const all = collectAllMatches(t).filter(m => m.played && m.home && m.away);
   const stats = {};
-  t.teams.forEach(team => stats[team.id] = { id:team.id, name:team.name, played:0, wins:0, draws:0, losses:0, gf:0, ga:0, resultsInOrder:[] });
+  t.teams.forEach(team => stats[team.id] = { id:team.id, name:team.name, played:0, wins:0, draws:0, losses:0, gf:0, ga:0, resultsInOrder:[], possSum:0, possCount:0 });
   all.forEach(m => {
     const h = stats[m.home], a = stats[m.away];
     if(!h || !a) return;
@@ -1559,12 +1641,17 @@ function computeTeamInsights(t){
     else if(m.homeScore < m.awayScore){ a.wins++; h.losses++; hr='L'; ar='W'; }
     else { h.draws++; a.draws++; hr='D'; ar='D'; }
     h.resultsInOrder.push(hr); a.resultsInOrder.push(ar);
+    if(m.teamStats){
+      if(m.teamStats.home?.possession!=null){ h.possSum += m.teamStats.home.possession; h.possCount++; }
+      if(m.teamStats.away?.possession!=null){ a.possSum += m.teamStats.away.possession; a.possCount++; }
+    }
   });
   const pointsFor = arr => arr.reduce((sum,r) => sum + (r==='W'?3:r==='D'?1:0), 0);
   return Object.values(stats).map(s => {
     const winRate = s.played ? Math.round((s.wins/s.played)*100) : 0;
     const gpg = s.played ? (s.gf/s.played) : 0;
     const conceded = s.played ? (s.ga/s.played) : 0;
+    const avgPossession = s.possCount ? Math.round(s.possSum/s.possCount) : null;
     const last3 = s.resultsInOrder.slice(-3);
     const prev = s.resultsInOrder.slice(-6,-3);
     let trend = 'steady';
@@ -1573,7 +1660,7 @@ function computeTeamInsights(t){
       if(a > b+0.4) trend = 'improving';
       else if(a < b-0.4) trend = 'cooling off';
     }
-    return { ...s, winRate, gpg, conceded, trend };
+    return { ...s, winRate, gpg, conceded, avgPossession, trend };
   }).sort((x,y) => y.winRate-x.winRate || y.gf-x.gf);
 }
 
@@ -1586,11 +1673,12 @@ function renderInsights(t){
   const tightestDefense = [...rows].sort((a,b)=>a.conceded-b.conceded)[0];
   const hottest = rows.find(r => r.trend === 'improving');
 
+  const anyPossession = rows.some(r => r.avgPossession != null);
   return `
   <div class="hint" style="margin-bottom:14px;">Computed live from your match data — win rates, scoring form, trends. Not a live LLM/AI call (that would need a private API key, which isn't safe to embed in a public site) — just real stats that update instantly as results come in.</div>
   <div class="panel" style="margin-bottom:20px;">
     <table class="standings">
-      <thead><tr><th class="team-col">Team</th><th>P</th><th>Win %</th><th>GF/g</th><th>GA/g</th><th>Form</th></tr></thead>
+      <thead><tr><th class="team-col">Team</th><th>P</th><th>Win %</th><th>GF/g</th><th>GA/g</th>${anyPossession?'<th>Poss.</th>':''}<th>Form</th></tr></thead>
       <tbody>
         ${rows.map(r => `<tr>
           <td class="team-name">${escapeHtml(r.name)}</td>
@@ -1598,6 +1686,7 @@ function renderInsights(t){
           <td class="pts">${r.winRate}%</td>
           <td>${r.gpg.toFixed(1)}</td>
           <td>${r.conceded.toFixed(1)}</td>
+          ${anyPossession?`<td>${r.avgPossession!=null?r.avgPossession+'%':'—'}</td>`:''}
           <td>${r.trend==='improving' ? '▲ Improving' : r.trend==='cooling off' ? '▼ Cooling off' : '— Steady'}</td>
         </tr>`).join('')}
       </tbody>
@@ -1778,8 +1867,17 @@ function renderModal(){
     const teamsById = Object.fromEntries(t.teams.map(x=>[x.id,x]));
     const m = md.match;
     const photo = md.photoDataUrl !== undefined ? md.photoDataUrl : m.photo;
+    const ts = m.teamStats || { home:{}, away:{} };
+    function statFieldRow(label, key, opts){
+      opts = opts || {};
+      return `<div class="row" style="align-items:center; gap:8px; margin-top:${opts.first?'0':'8'}px;">
+        <input type="number" min="0" ${opts.max?`max="${opts.max}"`:''} id="ts-home-${key}" placeholder="Home" value="${ts.home?.[key] ?? ''}">
+        <span class="vs" style="min-width:70px; text-align:center;">${label}</span>
+        <input type="number" min="0" ${opts.max?`max="${opts.max}"`:''} id="ts-away-${key}" placeholder="Away" value="${ts.away?.[key] ?? ''}">
+      </div>`;
+    }
     return `<div class="overlay" data-action="close-modal-bg">
-      <div class="modal" onclick="event.stopPropagation()">
+      <div class="modal" style="max-width:480px;" onclick="event.stopPropagation()">
         <button class="close-x" data-action="close-modal">✕</button>
         <h2>Match Result</h2>
         <p class="sub-txt">${md.groupLabel ? escapeHtml(md.groupLabel) : (md.roundLabel || '')}</p>
@@ -1790,6 +1888,16 @@ function renderModal(){
           <input type="number" min="0" id="score-away" value="${m.awayScore ?? ''}">
           <span class="team-lbl">${escapeHtml(teamsById[m.away]?.name||'')}</span>
         </div>
+
+        <label>Match Stats <span style="font-weight:400;color:var(--text-faint);text-transform:none;">(optional — matches the in-game results screen)</span></label>
+        ${statFieldRow('Shots', 'shots', {first:true})}
+        ${statFieldRow('Shots on Goal', 'shotsOnGoal')}
+        ${statFieldRow('Possession %', 'possession', {max:100})}
+        ${statFieldRow('Pass Accuracy %', 'passAccuracy', {max:100})}
+        ${statFieldRow('Fouls', 'fouls')}
+        ${statFieldRow('Offsides', 'offsides')}
+        <div class="hint">Possession auto-fills the other side. Everything else is entered as shown on the results screen.</div>
+
         <label>Screenshot (optional)</label>
         <div class="photo-drop" data-action="trigger-photo">
           ${photo ? `<img class="photo-preview" src="${photo}">` : 'Tap to upload a screenshot from the game'}
@@ -1815,12 +1923,14 @@ function renderModal(){
     const homeRoster = (t.rosters && t.rosters[match.home]) || [];
     const awayRoster = (t.rosters && t.rosters[match.away]) || [];
 
-    function rowsHtml(side, rows){
+    function rowsHtml(side, rows, goalEvents){
       if(rows.length===0) return `<div class="hint">No players added yet.</div>`;
-      return rows.map((r,i) => `
+      return rows.map((r,i) => {
+        const goalCount = (goalEvents||[]).filter(g => g.team===side && g.player.trim().toLowerCase()===r.name.trim().toLowerCase()).length;
+        return `
         <div class="stat-row">
           <input type="text" list="roster-${side}" placeholder="Player name" data-stat-field="name" data-stat-side="${side}" data-stat-idx="${i}" value="${escapeHtml(r.name)}">
-          <input type="number" min="0" title="Goals" data-stat-field="goals" data-stat-side="${side}" data-stat-idx="${i}" value="${r.goals||0}">
+          <span style="text-align:center; font-family:var(--mono); font-weight:700; color:var(--primary-dark);" title="Goals (from timeline below)">${goalCount}</span>
           <input type="number" min="0" title="Assists" data-stat-field="assists" data-stat-side="${side}" data-stat-idx="${i}" value="${r.assists||0}">
           <input type="number" min="0" title="Fouls" data-stat-field="fouls" data-stat-side="${side}" data-stat-idx="${i}" value="${r.fouls||0}">
           <input type="number" min="0" title="Offsides" data-stat-field="offsides" data-stat-side="${side}" data-stat-idx="${i}" value="${r.offsides||0}">
@@ -1828,7 +1938,7 @@ function renderModal(){
           <input type="number" min="0" title="Red cards" data-stat-field="reds" data-stat-side="${side}" data-stat-idx="${i}" value="${r.reds||0}">
           <button class="rm" data-action="remove-stat-row" data-stat-side="${side}" data-stat-idx="${i}">✕</button>
         </div>
-      `).join('');
+      `;}).join('');
     }
 
     const potmOptions = [
@@ -1852,19 +1962,38 @@ function renderModal(){
         ${md.statsPhoto ? `<div style="margin-top:8px;"><button class="btn btn-sm" data-action="run-ocr" ${state.ocrBusy?'disabled':''}>${state.ocrBusy?'Reading…':'Read text from screenshot (beta)'}</button></div>` : ''}
         ${md.ocrText ? `<div class="hint">Beta — this reads raw text off the image for reference only, it doesn't auto-fill the fields below. Double-check figures.</div><textarea class="ocr-box" readonly>${escapeHtml(md.ocrText)}</textarea>` : ''}
 
+        <label>Goal Timeline <span style="font-weight:400;color:var(--text-faint);text-transform:none;">(minute + scorer — feeds each player's goal tally below automatically)</span></label>
+        ${(md.goalEvents||[]).length===0 ? `<div class="hint">No goals added yet.</div>` : (md.goalEvents||[]).slice().sort((a,b)=>(a.minute||0)-(b.minute||0)).map(g => {
+          const idx = md.goalEvents.indexOf(g);
+          return `<div class="goal-event-row">
+            <input type="number" min="0" max="130" placeholder="Min" data-goal-field="minute" data-goal-idx="${idx}" value="${g.minute ?? ''}">
+            <select data-goal-field="team" data-goal-idx="${idx}">
+              <option value="home" ${g.team==='home'?'selected':''}>${escapeHtml(homeTeam?.name||'Home')}</option>
+              <option value="away" ${g.team==='away'?'selected':''}>${escapeHtml(awayTeam?.name||'Away')}</option>
+            </select>
+            <input type="text" placeholder="Scorer name" list="roster-${g.team==='home'?'home':'away'}" data-goal-field="player" data-goal-idx="${idx}" value="${escapeHtml(g.player||'')}">
+            <button class="rm" data-action="remove-goal-event" data-goal-idx="${idx}">✕</button>
+          </div>`;
+        }).join('')}
+        <button class="btn btn-sm" data-action="add-goal-event" style="margin-top:6px;">+ Add Goal</button>
+
         <div class="stat-cols">
           <div>
             <div class="stat-col-title">${escapeHtml(homeTeam?.name||'Home')}</div>
-            <div class="stat-head"><span>Player</span><span>G</span><span>A</span><span>F</span><span>Off</span><span>Y</span><span>R</span><span></span></div>
-            <datalist id="roster-home">${homeRoster.map(n=>`<option value="${escapeHtml(n)}">`).join('')}</datalist>
-            ${rowsHtml('home', md.stats.home)}
+            <div class="stat-col-scroll">
+              <div class="stat-head"><span>Player</span><span>G</span><span>A</span><span>F</span><span>Off</span><span>Y</span><span>R</span><span></span></div>
+              <datalist id="roster-home">${homeRoster.map(n=>`<option value="${escapeHtml(n)}">`).join('')}</datalist>
+              ${rowsHtml('home', md.stats.home, md.goalEvents)}
+            </div>
             <button class="btn btn-sm" data-action="add-stat-row" data-stat-side="home" style="margin-top:6px;">+ Player</button>
           </div>
           <div>
             <div class="stat-col-title">${escapeHtml(awayTeam?.name||'Away')}</div>
-            <div class="stat-head"><span>Player</span><span>G</span><span>A</span><span>F</span><span>Off</span><span>Y</span><span>R</span><span></span></div>
-            <datalist id="roster-away">${awayRoster.map(n=>`<option value="${escapeHtml(n)}">`).join('')}</datalist>
-            ${rowsHtml('away', md.stats.away)}
+            <div class="stat-col-scroll">
+              <div class="stat-head"><span>Player</span><span>G</span><span>A</span><span>F</span><span>Off</span><span>Y</span><span>R</span><span></span></div>
+              <datalist id="roster-away">${awayRoster.map(n=>`<option value="${escapeHtml(n)}">`).join('')}</datalist>
+              ${rowsHtml('away', md.stats.away, md.goalEvents)}
+            </div>
             <button class="btn btn-sm" data-action="add-stat-row" data-stat-side="away" style="margin-top:6px;">+ Player</button>
           </div>
         </div>
@@ -1997,6 +2126,18 @@ function attachEvents(){
   });
   const photoInput = document.getElementById('photo-input');
   if(photoInput) photoInput.addEventListener('change', onPhotoSelected);
+  const possHomeEl = document.getElementById('ts-home-possession');
+  const possAwayEl = document.getElementById('ts-away-possession');
+  if(possHomeEl && possAwayEl){
+    possHomeEl.addEventListener('input', e => {
+      const v = parseInt(e.target.value);
+      possAwayEl.value = (!isNaN(v) && v>=0 && v<=100) ? (100-v) : '';
+    });
+    possAwayEl.addEventListener('input', e => {
+      const v = parseInt(e.target.value);
+      possHomeEl.value = (!isNaN(v) && v>=0 && v<=100) ? (100-v) : '';
+    });
+  }
   const logoPhotoInput = document.getElementById('logo-photo-input');
   if(logoPhotoInput) logoPhotoInput.addEventListener('change', onLogoPhotoSelected);
   const manageLogoInput = document.getElementById('manage-logo-input');
@@ -2019,6 +2160,20 @@ function attachEvents(){
       const field = el.getAttribute('data-stat-field');
       const val = field === 'name' ? e.target.value : (parseInt(e.target.value) || 0);
       state.modal.stats[side][idx][field] = val;
+    });
+  });
+  root.querySelectorAll('[data-goal-field]').forEach(el => {
+    const evt = el.tagName === 'SELECT' ? 'change' : 'input';
+    el.addEventListener(evt, e => {
+      const idx = parseInt(el.getAttribute('data-goal-idx'));
+      const field = el.getAttribute('data-goal-field');
+      const val = field === 'minute' ? (e.target.value === '' ? null : parseInt(e.target.value)) : e.target.value;
+      if(field === 'team' && val !== state.modal.goalEvents[idx].team){
+        state.modal.goalEvents[idx].team = val;
+        render(); // re-render so the scorer datalist swaps to the right roster
+        return;
+      }
+      state.modal.goalEvents[idx][field] = val;
     });
   });
   const statsPhotoInput = document.getElementById('stats-photo-input');
@@ -2088,6 +2243,16 @@ async function dispatchAction(action, el){
   else if(action === 'add-stat-row'){
     const side = el.getAttribute('data-stat-side');
     state.modal.stats[side].push({ id:genId(), name:'', goals:0, assists:0, fouls:0, offsides:0, yellows:0, reds:0 });
+    render();
+  }
+  else if(action === 'add-goal-event'){
+    if(!state.modal.goalEvents) state.modal.goalEvents = [];
+    state.modal.goalEvents.push({ id:genId(), minute:null, team:'home', player:'' });
+    render();
+  }
+  else if(action === 'remove-goal-event'){
+    const idx = parseInt(el.getAttribute('data-goal-idx'));
+    state.modal.goalEvents.splice(idx,1);
     render();
   }
   else if(action === 'remove-stat-row'){
@@ -2403,7 +2568,20 @@ async function saveScore(){
   }
 
   const photo = md.photoDataUrl !== undefined ? md.photoDataUrl : md.match.photo;
-  const patch = { homeScore, awayScore, played:true, photo, playedAt: Date.now() };
+  const statKeys = ['shots','shotsOnGoal','possession','passAccuracy','fouls','offsides'];
+  function readStatVal(side, key){
+    const raw = document.getElementById(`ts-${side}-${key}`)?.value;
+    if(raw === '' || raw == null) return null;
+    const n = parseInt(raw);
+    if(isNaN(n)) return null;
+    const capped = (key==='possession'||key==='passAccuracy') ? Math.max(0, Math.min(100, n)) : Math.max(0, n);
+    return capped;
+  }
+  const teamStats = {
+    home: Object.fromEntries(statKeys.map(k => [k, readStatVal('home', k)])),
+    away: Object.fromEntries(statKeys.map(k => [k, readStatVal('away', k)])),
+  };
+  const patch = { homeScore, awayScore, played:true, photo, playedAt: Date.now(), teamStats };
 
   let celebration = null;
   if(md.kind === 'league'){
@@ -2438,7 +2616,7 @@ async function saveScore(){
 async function clearScore(){
   const t = state.currentTournament;
   const md = state.modal;
-  const patch = { homeScore:null, awayScore:null, played:false, photo:null, playedAt:null };
+  const patch = { homeScore:null, awayScore:null, played:false, photo:null, playedAt:null, teamStats:{home:{shots:null, shotsOnGoal:null, possession:null, passAccuracy:null, fouls:null, offsides:null}, away:{shots:null, shotsOnGoal:null, possession:null, passAccuracy:null, fouls:null, offsides:null}} };
   if(md.kind === 'league'){ Object.assign(t.matches.find(x=>x.id===md.match.id), patch); }
   else if(md.kind === 'group'){ Object.assign(t.groupMatches.find(x=>x.id===md.match.id), patch); }
   else {
@@ -2473,6 +2651,7 @@ function openStatsModal(kind, matchId, roundIdx){
     statsPhoto: match.statsPhoto || null,
     ocrText: null,
     gk: match.gk ? {...match.gk} : { home:'', away:'' },
+    goalEvents: (match.goalEvents || []).map(g => ({...g})),
   };
   state.err = null;
   render();
@@ -2521,10 +2700,36 @@ async function saveStats(){
   const t = state.currentTournament;
   const md = state.modal;
   const match = findMatchByRef(t, md.kind, md.matchId, md.roundIdx);
-  const clean = side => md.stats[side]
-    .filter(r => r.name && r.name.trim())
-    .map(r => ({ name:r.name.trim(), goals:+r.goals||0, assists:+r.assists||0, fouls:+r.fouls||0, offsides:+r.offsides||0, yellows:+r.yellows||0, reds:+r.reds||0 }));
+
+  const cleanGoalEvents = (md.goalEvents||[])
+    .filter(g => g.player && g.player.trim())
+    .map(g => ({ minute: g.minute!=null ? Math.max(0, parseInt(g.minute)) : null, team: g.team==='away'?'away':'home', player: g.player.trim() }));
+
+  const goalCounts = { home: {}, away: {} };
+  cleanGoalEvents.forEach(g => {
+    const key = g.player.toLowerCase();
+    goalCounts[g.team][key] = (goalCounts[g.team][key]||0) + 1;
+  });
+
+  const clean = side => {
+    const rows = md.stats[side]
+      .filter(r => r.name && r.name.trim())
+      .map(r => ({ name:r.name.trim(), goals:0, assists:+r.assists||0, fouls:+r.fouls||0, offsides:+r.offsides||0, yellows:+r.yellows||0, reds:+r.reds||0 }));
+    // apply goal counts from the timeline, creating a row for any scorer not already listed
+    Object.entries(goalCounts[side]).forEach(([key, count]) => {
+      let row = rows.find(r => r.name.toLowerCase() === key);
+      if(!row){
+        const original = cleanGoalEvents.find(g => g.team===side && g.player.toLowerCase()===key);
+        row = { name: original.player, goals:0, assists:0, fouls:0, offsides:0, yellows:0, reds:0 };
+        rows.push(row);
+      }
+      row.goals = count;
+    });
+    return rows;
+  };
+
   match.stats = { home: clean('home'), away: clean('away') };
+  match.goalEvents = cleanGoalEvents;
   match.potm = (md.potm && md.potm.name && md.potm.name.trim()) ? { side: md.potm.side, name: md.potm.name.trim() } : null;
   match.statsPhoto = md.statsPhoto || null;
   match.gk = { home: (md.gk.home||'').trim(), away: (md.gk.away||'').trim() };
@@ -2546,7 +2751,7 @@ async function confirmAddMatch(){
   if(home === away){ state.err = "Pick two different teams."; render(); return; }
   const t = state.currentTournament;
   t.matches.push({ id:genId(), home, away, homeScore:null, awayScore:null, played:false, photo:null, playedAt:null,
-    stats:{home:[], away:[]}, potm:null, statsPhoto:null });
+    stats:{home:[], away:[]}, potm:null, statsPhoto:null, teamStats:{home:{shots:null, shotsOnGoal:null, possession:null, passAccuracy:null, fouls:null, offsides:null}, away:{shots:null, shotsOnGoal:null, possession:null, passAccuracy:null, fouls:null, offsides:null}}, goalEvents:[] });
   await saveTournament(t);
   await refreshIndexEntry(t);
   state.modal = null; state.err=null;
